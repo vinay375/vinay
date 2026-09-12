@@ -1,79 +1,44 @@
-from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, Query
-import yt_dlp
+from fastapi.middleware.cors import CORSMiddleware
+import httpx
 
-app = FastAPI(title="YouTube Link API")
+app = FastAPI(title="YouTube Downloader API")
 
+# Frontend se backend call enable karne ke liye CORS setup
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def is_youtube_url(url: str) -> bool:
-    host = urlparse(url).netloc.lower()
-    return host in {
-        "youtube.com",
-        "www.youtube.com",
-        "m.youtube.com",
-        "youtu.be",
-        "www.youtu.be",
+@app.get("/api/download")
+async def download_video(url: str = Query(..., description="YouTube Video URL")):
+    # Invidious / Public API node ka use IP blocking bypass karne ke liye
+    api_url = f"https://api.cobalt.tools/api/json"
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "url": url,
+        "vQuality": "max",
+        "isAudioOnly": False
     }
 
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(api_url, json=payload, headers=headers, timeout=20.0)
+            data = response.json()
 
-@app.get("/api/video")
-def get_video_links(url: str = Query(..., description="YouTube video URL")):
-    if not is_youtube_url(url):
-        raise HTTPException(
-            status_code=400,
-            detail="Please provide a valid YouTube URL.",
-        )
-
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        # Render/Cloud IP ban se bachne ke liye user-agent/extractor args
-        'extractor_args': {'youtube': ['player_client=android,web']},
-    }
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            
-            download_options = []
-            for stream in info.get("formats", []):
-                # Streams filters
-                vcodec = stream.get("vcodec")
-                acodec = stream.get("acodec")
-                
-                has_video = vcodec != "none" and vcodec is not None
-                has_audio = acodec != "none" and acodec is not None
-
-                if has_video and has_audio:
-                    stream_type = "video_with_audio"
-                elif has_audio:
-                    stream_type = "audio_only"
-                elif has_video:
-                    stream_type = "video_only"
-                else:
-                    continue
-
-                download_options.append({
-                    "format_id": stream.get("format_id"),
-                    "type": stream_type,
-                    "has_audio": has_audio,
-                    "has_video": has_video,
-                    "resolution": stream.get("resolution") or f"{stream.get('height')}p",
-                    "audio_bitrate": f"{int(stream.get('abr'))}kbps" if stream.get('abr') else None,
-                    "mime_type": stream.get("ext"),
-                    "file_size_bytes": stream.get("filesize") or stream.get("filesize_approx"),
-                    "download_url": stream.get("url"),
-                })
+            if response.status_code != 200 or data.get("status") == "error":
+                raise HTTPException(status_code=400, detail="Video extract nahi ho pa rahi hai.")
 
             return {
-                "title": info.get("title"),
-                "video_id": info.get("id"),
-                "thumbnail_url": info.get("thumbnail"),
-                "download_options": download_options,
+                "status": "success",
+                "download_url": data.get("url"),
+                "filename": data.get("filename", "video.mp4")
             }
-
-    except Exception as error:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Could not get video links: {str(error)}",
-        )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
